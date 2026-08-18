@@ -8,23 +8,45 @@ module cmac_wrapper_TEMPLATE (
     (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 ap_rst_n RST" *)
     (* X_INTERFACE_PARAMETER = "POLARITY ACTIVE_LOW" *)
     input          ap_rst_n,
-    // AXI-Lite slave interface for control and stats
-    input          s_axil_awvalid,
+    // AXI-Lite slave interface for control and stats.
+    // Explicit aximm interface attributes (with ADDR_WIDTH) are required so
+    // ipx::package_project infers a 32-bit address block; without them the
+    // address block's baseAddress is emitted with bitStringLength=1 and the
+    // host AXI-Lite interconnect fails to assign it a base address.
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axil AWADDR" *)
+    (* X_INTERFACE_PARAMETER = "PROTOCOL AXI4LITE, ADDR_WIDTH 32, DATA_WIDTH 32" *)
     input   [31:0] s_axil_awaddr,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axil AWVALID" *)
+    input          s_axil_awvalid,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axil AWREADY" *)
     output         s_axil_awready,
-    input          s_axil_wvalid,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axil WDATA" *)
     input   [31:0] s_axil_wdata,
-    output         s_axil_wready,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axil WSTRB" *)
     input    [3:0] s_axil_wstrb,
-    output         s_axil_bvalid,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axil WVALID" *)
+    input          s_axil_wvalid,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axil WREADY" *)
+    output         s_axil_wready,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axil BRESP" *)
     output   [1:0] s_axil_bresp,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axil BVALID" *)
+    output         s_axil_bvalid,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axil BREADY" *)
     input          s_axil_bready,
-    input          s_axil_arvalid,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axil ARADDR" *)
     input   [31:0] s_axil_araddr,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axil ARVALID" *)
+    input          s_axil_arvalid,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axil ARREADY" *)
     output         s_axil_arready,
-    output         s_axil_rvalid,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axil RDATA" *)
     output  [31:0] s_axil_rdata,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axil RRESP" *)
     output   [1:0] s_axil_rresp,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axil RVALID" *)
+    output         s_axil_rvalid,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 s_axil RREADY" *)
     input          s_axil_rready,
     // AXI-Stream master interface for Ethernet Rx
     output         m_axis_tvalid,
@@ -70,6 +92,30 @@ module cmac_wrapper_TEMPLATE (
     wire        gtwiz_reset_rx_datapath;
     wire        gtwiz_reset_tx_datapath;
     wire        init_clk;
+    wire        ctrl_clk;                 // 100 MHz CMAC control clock (MMCM out)
+    wire        ctrl_clk_locked;          // MMCM lock
+    wire        mmcm_fb;                  // MMCM feedback
+    wire        mmcm_clkout0;             // MMCM 100 MHz output (pre-BUFG)
+    reg  [3:0]  ctrl_rst_sync = 4'b0000;  // async-assert / sync-deassert reset
+    wire        ctrl_aresetn;             // deasserted after MMCM lock
+    // CMAC AXI-Lite (ctrl_clk domain) between axil_cdc and cmac_inst
+    wire        cmac_s_axi_awvalid;
+    wire [31:0] cmac_s_axi_awaddr;
+    wire        cmac_s_axi_awready;
+    wire        cmac_s_axi_wvalid;
+    wire [31:0] cmac_s_axi_wdata;
+    wire  [3:0] cmac_s_axi_wstrb;
+    wire        cmac_s_axi_wready;
+    wire        cmac_s_axi_bvalid;
+    wire  [1:0] cmac_s_axi_bresp;
+    wire        cmac_s_axi_bready;
+    wire        cmac_s_axi_arvalid;
+    wire [31:0] cmac_s_axi_araddr;
+    wire        cmac_s_axi_arready;
+    wire        cmac_s_axi_rvalid;
+    wire [31:0] cmac_s_axi_rdata;
+    wire  [1:0] cmac_s_axi_rresp;
+    wire        cmac_s_axi_rready;
 //    wire  [8:0] ctl_tx_pause_req;
 //    wire        ctl_tx_resend_pause;
 
@@ -311,8 +357,96 @@ module cmac_wrapper_TEMPLATE (
     wire         s_axis_tx_tlast;
     wire         s_axis_tx_tuser_err;
 
-    assign init_clk                = ap_clk;
-    assign cmac_sys_reset          = ~ap_rst_n;
+    // CMAC control clock: MMCM derives 100 MHz from 300 MHz ap_clk. The CMAC's
+    // AXI4-Lite stats read-mux only meets timing <= ~100 MHz, so it cannot
+    // share the fast ap_clk (this was the cause of the 113.9 MHz auto-scaling).
+    MMCME4_BASE #(
+        .BANDWIDTH          ("OPTIMIZED"),
+        .CLKFBOUT_MULT_F    (3.0),
+        .CLKFBOUT_PHASE     (0.0),
+        .CLKIN1_PERIOD      (3.333),
+        .CLKOUT0_DIVIDE_F   (9.0),
+        .CLKOUT0_DUTY_CYCLE (0.5),
+        .CLKOUT0_PHASE      (0.0),
+        .DIVCLK_DIVIDE      (1),
+        .REF_JITTER1        (0.010),
+        .STARTUP_WAIT       ("FALSE")
+    ) ctrl_mmcm (
+        .CLKIN1      (ap_clk),
+        .CLKFBIN     (mmcm_fb),
+        .CLKFBOUT    (mmcm_fb),
+        .CLKOUT0     (mmcm_clkout0),
+        .LOCKED      (ctrl_clk_locked),
+        .PWRDWN      (1'b0),
+        .RST         (~ap_rst_n),
+        .CLKFBOUTB   (),
+        .CLKOUT0B    (),
+        .CLKOUT1     (),
+        .CLKOUT1B    (),
+        .CLKOUT2     (),
+        .CLKOUT2B    (),
+        .CLKOUT3     (),
+        .CLKOUT3B    (),
+        .CLKOUT4     (),
+        .CLKOUT5     (),
+        .CLKOUT6     ()
+    );
+    BUFG ctrl_clk_bufg (.I(mmcm_clkout0), .O(ctrl_clk));
+
+    // Reset in ctrl_clk domain: asserted until the MMCM locks and the
+    // deassertion has propagated (4 FF), so the CMAC only starts on a stable clock.
+    always @(posedge ctrl_clk or negedge ctrl_clk_locked) begin
+        if (!ctrl_clk_locked)
+            ctrl_rst_sync <= 4'b0000;
+        else
+            ctrl_rst_sync <= {ctrl_rst_sync[2:0], 1'b1};
+    end
+    assign ctrl_aresetn = ctrl_rst_sync[3];
+
+    // AXI-Lite CDC: 300 MHz ap_clk boundary <-> 100 MHz CMAC s_axi.
+    axil_cdc axil_cdc_inst (
+        .s_axi_aclk    (ap_clk),
+        .s_axi_aresetn (ap_rst_n),
+        .s_axi_awvalid (s_axil_awvalid),
+        .s_axi_awaddr  (s_axil_awaddr),
+        .s_axi_awready (s_axil_awready),
+        .s_axi_wvalid  (s_axil_wvalid),
+        .s_axi_wdata   (s_axil_wdata),
+        .s_axi_wstrb   (s_axil_wstrb),
+        .s_axi_wready  (s_axil_wready),
+        .s_axi_bvalid  (s_axil_bvalid),
+        .s_axi_bresp   (s_axil_bresp),
+        .s_axi_bready  (s_axil_bready),
+        .s_axi_arvalid (s_axil_arvalid),
+        .s_axi_araddr  (s_axil_araddr),
+        .s_axi_arready (s_axil_arready),
+        .s_axi_rvalid  (s_axil_rvalid),
+        .s_axi_rdata   (s_axil_rdata),
+        .s_axi_rresp   (s_axil_rresp),
+        .s_axi_rready  (s_axil_rready),
+        .m_axi_aclk    (ctrl_clk),
+        .m_axi_aresetn (ctrl_aresetn),
+        .m_axi_awvalid (cmac_s_axi_awvalid),
+        .m_axi_awaddr  (cmac_s_axi_awaddr),
+        .m_axi_awready (cmac_s_axi_awready),
+        .m_axi_wvalid  (cmac_s_axi_wvalid),
+        .m_axi_wdata   (cmac_s_axi_wdata),
+        .m_axi_wstrb   (cmac_s_axi_wstrb),
+        .m_axi_wready  (cmac_s_axi_wready),
+        .m_axi_bvalid  (cmac_s_axi_bvalid),
+        .m_axi_bresp   (cmac_s_axi_bresp),
+        .m_axi_bready  (cmac_s_axi_bready),
+        .m_axi_arvalid (cmac_s_axi_arvalid),
+        .m_axi_araddr  (cmac_s_axi_araddr),
+        .m_axi_arready (cmac_s_axi_arready),
+        .m_axi_rvalid  (cmac_s_axi_rvalid),
+        .m_axi_rdata   (cmac_s_axi_rdata),
+        .m_axi_rresp   (cmac_s_axi_rresp),
+        .m_axi_rready  (cmac_s_axi_rready)
+    );
+
+    assign init_clk                = ctrl_clk;
+    assign cmac_sys_reset          = ~ctrl_aresetn;
     assign s_axis_tx_tuser_err     = 1'b0;  // TUser not used
 
     assign gt_loopback_in          = {4{3'b000}};
@@ -355,23 +489,23 @@ cmac_usplus_ID cmac_inst (
     .init_clk                            (init_clk),
     .s_axi_aclk                          (init_clk),
     .s_axi_sreset                        (cmac_sys_reset),
-    .s_axi_awvalid                       (s_axil_awvalid),
-    .s_axi_awaddr                        (s_axil_awaddr),
-    .s_axi_awready                       (s_axil_awready),
-    .s_axi_wvalid                        (s_axil_wvalid),
-    .s_axi_wdata                         (s_axil_wdata),
-    .s_axi_wstrb                         (s_axil_wstrb),
-    .s_axi_wready                        (s_axil_wready),
-    .s_axi_bvalid                        (s_axil_bvalid),
-    .s_axi_bresp                         (s_axil_bresp),
-    .s_axi_bready                        (s_axil_bready),
-    .s_axi_arvalid                       (s_axil_arvalid),
-    .s_axi_araddr                        (s_axil_araddr),
-    .s_axi_arready                       (s_axil_arready),
-    .s_axi_rvalid                        (s_axil_rvalid),
-    .s_axi_rdata                         (s_axil_rdata),
-    .s_axi_rresp                         (s_axil_rresp),
-    .s_axi_rready                        (s_axil_rready),
+    .s_axi_awvalid                       (cmac_s_axi_awvalid),
+    .s_axi_awaddr                        (cmac_s_axi_awaddr),
+    .s_axi_awready                       (cmac_s_axi_awready),
+    .s_axi_wvalid                        (cmac_s_axi_wvalid),
+    .s_axi_wdata                         (cmac_s_axi_wdata),
+    .s_axi_wstrb                         (cmac_s_axi_wstrb),
+    .s_axi_wready                        (cmac_s_axi_wready),
+    .s_axi_bvalid                        (cmac_s_axi_bvalid),
+    .s_axi_bresp                         (cmac_s_axi_bresp),
+    .s_axi_bready                        (cmac_s_axi_bready),
+    .s_axi_arvalid                       (cmac_s_axi_arvalid),
+    .s_axi_araddr                        (cmac_s_axi_araddr),
+    .s_axi_arready                       (cmac_s_axi_arready),
+    .s_axi_rvalid                        (cmac_s_axi_rvalid),
+    .s_axi_rdata                         (cmac_s_axi_rdata),
+    .s_axi_rresp                         (cmac_s_axi_rresp),
+    .s_axi_rready                        (cmac_s_axi_rready),
     .pm_tick                             (pm_tick),
     .user_reg0                           (),
 
@@ -608,7 +742,7 @@ cmac_usplus_ID cmac_inst (
     .ctl_tx_send_lfi                     (ctl_tx_send_lfi),
 
     .core_drp_reset                      (1'b0),
-    .drp_clk                             (1'b0),
+    .drp_clk                             (init_clk),
     .drp_addr                            (0),
     .drp_di                              (0),
     .drp_en                              (1'b0),

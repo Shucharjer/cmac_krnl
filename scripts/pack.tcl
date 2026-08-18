@@ -5,6 +5,7 @@ set src_dir    ${work_dir}/src
 set build_dir     [file normalize [lindex $argv 0]]
 set board         [lindex $argv 1]
 set axi_clk_freq  [lindex $argv 2]
+set ctrl_clk_freq 100
 set n_jobs        [lindex $argv 3]
 
 set ip_build_dir ${build_dir}/ip
@@ -67,7 +68,7 @@ set_property -dict [list \
     CONFIG.CMAC_CAUI4_MODE      {1} \
     CONFIG.USER_INTERFACE       {AXIS} \
     CONFIG.ENABLE_AXI_INTERFACE {1} \
-    CONFIG.GT_DRP_CLK           $axi_clk_freq \
+    CONFIG.GT_DRP_CLK           $ctrl_clk_freq \
     CONFIG.CMAC_CORE_SELECT     $cmac_core_select \
     CONFIG.GT_GROUP_SELECT      $gt_group_select \
     CONFIG.GT_REF_CLK_FREQ      $gt_ref_clk_freq \
@@ -99,6 +100,7 @@ synthesis_ip $cmac_ethcdc $n_jobs
 add_files -norecurse [list \
     ${wrapper_src} \
     ${src_dir}/axis_packet_counter.v \
+    ${src_dir}/axil_cdc.v \
 ]
 set_property top $wrapper_module [current_fileset]
 update_compile_order -fileset sources_1
@@ -125,15 +127,38 @@ set_property -dict [list \
     xpm_libraries          {XPM_CDC XPM_MEMORY XPM_FIFO} \
 ] [ipx::current_core]
 set_property vitis_drc {ctrl_protocol ap_ctrl_none} [ipx::current_core]
-# Let Vitis link stage assign ap_clk FREQ_HZ from the platform clock, since
-# the U50 xdma_5 shell's aclk_kernel_00 is fixed at 300 MHz and can't be
-# retargeted via --kernel_frequency. The CMAC IP's GT_DRP_CLK is still
-# capped at 250 MHz internally, so reset timers may run ~20% short; CMAC's
-# min-duration reset requirements are still met at 300 MHz.
+# ap_clk runs at the platform's aclk_kernel_00 default (300 MHz) so the CMAC's
+# s_axil FREQ_HZ matches the host AXI-Lite interconnect (300 MHz) and gets a
+# base address. The CMAC control clocks (init_clk / s_axi_aclk / drp_clk) are
+# derived from ap_clk inside cmac_wrapper.v via an MMCM at ctrl_clk_freq (100
+# MHz); GT_DRP_CLK must match that slow control clock, not ap_clk.
 set_property ipi_drc {ignore_freq_hz true} [ipx::current_core]
-set_property range 4096 [ipx::get_address_blocks reg0 \
+set ab [ipx::get_address_blocks reg0 \
     -of_objects [ipx::get_memory_maps s_axil \
     -of_objects [ipx::current_core]]]
+set_property range 4096 $ab
+# Make the s_axil address block remappable so the BD address editor assigns it
+# a base address instead of excluding it ("Base Address: not_used"). Mirrors the
+# HLS s_axi_control block (Vitis/common/scripts/ipxhls.tcl), which does get a
+# base address: long-form immediate base address, a generated range, and
+# OFFSET_BASE_PARAM/OFFSET_HIGH_PARAM pointing at writable base-address
+# parameters. Without the OFFSET params the base address stays locked at 0x0,
+# which does not intersect the shell control master aperture <0x0180_0000 [8M]>
+# and the segment is dropped from ulp_m_axi_ctrl_user_01.
+set_property width                   32        $ab
+set_property access                  read-write $ab
+set_property usage                   register  $ab
+set_property base_address            0         $ab
+set_property base_address_format     long      $ab
+set_property base_address_resolve_type immediate $ab
+set_property range_format            long      $ab
+set_property range_resolve_type      generated $ab
+set p_offbase [ipx::add_address_block_parameter s_axil_base_addr $ab]
+set_property name  OFFSET_BASE_PARAM $p_offbase
+set_property value C_S_AXIL_BASEADDR $p_offbase
+set p_offhigh [ipx::add_address_block_parameter s_axil_high_addr $ab]
+set_property name  OFFSET_HIGH_PARAM $p_offhigh
+set_property value C_S_AXIL_HIGHADDR $p_offhigh
 
 ipx::create_xgui_files [ipx::current_core]
 ipx::update_checksums  [ipx::current_core]

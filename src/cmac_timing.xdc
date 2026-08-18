@@ -2,7 +2,15 @@
 set_false_path -through [get_nets /cmac_inst/usr_rx_reset]
 set_false_path -through [get_nets /cmac_inst/usr_tx_reset]
 # Set false path for upper design derived reset
-set_false_path -through [get_pins /cmac_sys_reset]
+set_false_path -through [get_nets /cmac_sys_reset]
+
+# CMAC control clock: MMCM-derived 100 MHz (ap_clk 300 MHz / 3). Treated as an
+# independent clock domain; its only crossing to ap_clk is the AXI-Lite CDC
+# (xpm_cdc_handshake), which is asynchronous and self-constrained.
+create_clock -name ctrl_clk -period 10.000 [get_nets /ctrl_clk]
+set_clock_groups -asynchronous \
+    -group [get_clocks -of_object [get_nets /ap_clk]] \
+    -group [get_clocks ctrl_clk]
 
 # Set CDC inter clock delay, assuming AXI-Stream Max Freq at 300MHz
 set axi_clk [get_clocks -of_object [get_nets /ap_clk]]

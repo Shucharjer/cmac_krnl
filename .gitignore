@@ -2,3 +2,5 @@ build
 .ipcache
 .Xil
 analyzer_input
+*.jou
+*.log
