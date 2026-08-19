@@ -16,12 +16,14 @@ void send(unsigned char *mem, unsigned int length, hls::stream<axi_t> &out) {
 outer_loop:
   for (unsigned int i = 0; i < length; i += 64) {
     tmp.keep = 0;
+    unsigned int remaining = length - i;
 
   inner_loop:
     for (ap_uint<7> j = 0; j < 64; ++j) {
-#pragma HLS UNROLL factor = 64
-      tmp.data((j << 3) + 7, j << 3) = mem[i + j];
-      tmp.keep[j] = 1;
+      if (j < remaining) {
+        tmp.data((j << 3) + 7, j << 3) = mem[i + j];
+        tmp.keep[j] = 1;
+      }
     }
     tmp.strb = tmp.keep;
     tmp.last = (i + 64 >= length) ? 1 : 0;

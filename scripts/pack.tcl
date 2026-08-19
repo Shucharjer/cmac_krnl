@@ -99,7 +99,6 @@ synthesis_ip $cmac_ethcdc $n_jobs
 
 add_files -norecurse [list \
     ${wrapper_src} \
-    ${src_dir}/axis_packet_counter.v \
     ${src_dir}/axil_cdc.v \
 ]
 set_property top $wrapper_module [current_fileset]
@@ -117,6 +116,7 @@ ipx::package_project -root_dir $ippack_dir -vendor nus.edu.sg \
     -library RTLKernel -taxonomy /KernelIP -import_files
 set_property name         ${krnl_name} [ipx::current_core]
 set_property display_name "CMAC 100GbE Vitis kernel for ${board} ${board_port}" [ipx::current_core]
+set_property description "CMAC UltraScale+ 100GbE (CAUI-4, RS-FEC) RTL kernel: 512-bit segmented AXI-Stream data path with AXI4-Lite control/status" [ipx::current_core]
 set_property -dict [list \
     version                {1.0} \
     core_revision          {1} \
